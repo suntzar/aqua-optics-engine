@@ -832,13 +832,22 @@
                     <input id="sliderWaveSpeed" type="range" min="0.2" max="2.4" step="0.05" value="1.00">
                 </div>
 
-                <!-- Espuma Costeira e Whitecaps -->
+                <!-- Espuma Costeira, Rendilhado Voronoi e Whitecaps -->
                 <div class="control-group">
                     <div class="control-row">
-                        <span class="control-name">Espuma de Rebentações &amp; Cristas</span>
-                        <span id="valFoamIntensity" class="font-mono-tech control-val">1.10x</span>
+                        <span class="control-name">Espuma Celular &amp; Rebentações</span>
+                        <span id="valFoamIntensity" class="font-mono-tech control-val">1.25x</span>
                     </div>
-                    <input id="sliderFoamIntensity" type="range" min="0.0" max="2.5" step="0.05" value="1.10">
+                    <input id="sliderFoamIntensity" type="range" min="0.0" max="2.5" step="0.05" value="1.25">
+                </div>
+
+                <!-- NOVO: Brilho Superficial GGX & Cintilação Solar (Glints) -->
+                <div class="control-group">
+                    <div class="control-row">
+                        <span class="control-name">Brilho Superficial &amp; Glints Solares</span>
+                        <span id="valSunGlint" class="font-mono-tech control-val">1.35x</span>
+                    </div>
+                    <input id="sliderSunGlint" type="range" min="0.0" max="2.8" step="0.05" value="1.35">
                 </div>
 
                 <!-- Força das Ondulações Interativas (Mouse/Objetos) -->
@@ -1295,7 +1304,8 @@
             waveHeight: 0.45,
             waveChoppy: 1.15,
             waveSpeed: 1.0,
-            foamIntensity: 1.10,
+            foamIntensity: 1.25,
+            sunGlintIntensity: 1.35,
             waveDirSpread: 0.35,
             waveSwellScale: 1.00,
 
@@ -1504,6 +1514,7 @@
             uniform float uWaveChoppy;
             uniform float uWaveSpeed;
             uniform float uFoamIntensity;
+            uniform float uSunGlintIntensity;
             uniform float uWaveDirSpread;
             uniform float uWaveSwellScale;
             uniform float uRippleDamping;
@@ -1524,6 +1535,12 @@
                 return fract(p.x * p.y);
             }
 
+            vec2 hash22(vec2 p) {
+                vec3 p3 = fract(vec3(p.xyx) * vec3(0.1031, 0.1030, 0.0973));
+                p3 += dot(p3, p3.yzx + 33.33);
+                return fract((p3.xx + p3.yz) * p3.zy);
+            }
+
             float noise2D(vec2 p) {
                 vec2 i = floor(p);
                 vec2 f = fract(p);
@@ -1533,6 +1550,120 @@
                 float c = hash21(i + vec2(0.0, 1.0));
                 float d = hash21(i + vec2(1.0, 1.0));
                 return mix(mix(a, b, f.x), mix(c, d, f.x), f.y);
+            }
+
+            // Rede Celular de Voronoi (Fronteiras de Plateau: d2 - d1 forma paredes de bolhas reais)
+            vec2 voronoiBubbleCells(vec2 x) {
+                vec2 n = floor(x);
+                vec2 f = fract(x);
+                float d1 = 8.0;
+                float d2 = 8.0;
+                for (int j = -1; j <= 1; j++) {
+                    for (int i = -1; i <= 1; i++) {
+                        vec2 g = vec2(float(i), float(j));
+                        vec2 o = hash22(n + g);
+                        vec2 r = g + (0.15 + 0.70 * o) - f;
+                        float d = dot(r, r);
+                        if (d < d1) {
+                            d2 = d1;
+                            d1 = d;
+                        } else if (d < d2) {
+                            d2 = d;
+                        }
+                    }
+                }
+                return vec2(sqrt(max(0.0, d1)), sqrt(max(0.0, d2)));
+            }
+
+            // Avalia a estrutura multi-escala da espuma (Filamentos + Rendilhado de Bolhas + Micro-Espuma)
+            vec3 evaluateMultiScaleFoam(vec2 worldXZ, vec2 waveSlope, float rawFoamEnergy, float distAtten) {
+                if (rawFoamEnergy <= 0.005) return vec3(0.0);
+
+                // Distorção de domínio (advection) guiada pela inclinação da onda e deriva do vento
+                vec2 drift = vec2(uTime * 0.22, -uTime * 0.16) * uWaveSpeed;
+                vec2 warpedUV = worldXZ + waveSlope * 0.65;
+
+                // Camada 1: Células macro de espuma (rendilhado largo de esteira)
+                vec2 vMacro = voronoiBubbleCells(warpedUV * 2.15 + drift);
+                float macroWeb = 1.0 - smoothstep(0.02, 0.26, vMacro.y - vMacro.x);
+
+                // Camada 2: Bolhas intermediárias (aglomerados de espuma aerada)
+                vec2 vMid = voronoiBubbleCells(warpedUV * 5.80 - drift * 1.4 + vec2(vMacro.x * 0.35));
+                float midBubbles = 1.0 - smoothstep(0.03, 0.30, vMid.y - vMid.x);
+                float bubbleCores = smoothstep(0.32, 0.05, vMid.x);
+
+                // Camada 3: Micro-espuma de alta frequência para dar textura porosa ao núcleo branco
+                float microFroth = noise2D(warpedUV * 18.5 + drift * 2.2) * 0.6 +
+                                   noise2D(warpedUV * 36.0 - drift * 3.0) * 0.4;
+
+                // Combinação hierárquica: bordas rendilhadas vazadas -> centro branco denso
+                float laceStructure = clamp(macroWeb * 0.62 + midBubbles * 0.52 + bubbleCores * 0.25, 0.0, 1.0);
+                float porousCore = smoothstep(0.38, 0.88, rawFoamEnergy) * (0.78 + 0.22 * microFroth);
+
+                // Threshold progressivo: energias baixas mostram apenas os filamentos da rede celular;
+                // energias altas preenchem as células formando a crista branca densa (whitecap)
+                float cellMask = smoothstep(0.58 - rawFoamEnergy * 0.52, 0.92 - rawFoamEnergy * 0.35, laceStructure);
+                float finalFoamMask = clamp(mix(cellMask * rawFoamEnergy * 1.35, 1.0, porousCore), 0.0, 1.0);
+
+                // Gradiente de relevo 3D das bolhas para perturbar a normal da água
+                float foamHeightGradX = (vMid.x - 0.35) * (midBubbles + microFroth * 0.5) * distAtten;
+                float foamHeightGradZ = (vMacro.x - 0.35) * (macroWeb + microFroth * 0.5) * distAtten;
+
+                return vec3(finalFoamMask, foamHeightGradX, foamHeightGradZ);
+            }
+
+            // Calcula a energia de espuma gerada por ondas de toque/mouse, chuva e colisão com boias/barco
+            float evaluateInteractiveFoamSources(vec2 xz) {
+                float energy = 0.0;
+
+                // 1. Espuma aerada nos anéis de impacto (toque na água, onda de choque e gotas de chuva)
+                int activeCount = int(uActiveRippleCount + 0.1);
+                for (int i = 0; i < 32; i++) {
+                    if (i >= activeCount) break;
+                    vec4 rp = uRipples[i];
+                    float age = uTime - rp.z;
+                    if (age > 0.0 && age < 3.4) {
+                        vec2 delta = xz - rp.xy;
+                        float maxR = age * 3.4 + 1.8;
+                        if (abs(delta.x) < maxR && abs(delta.y) < maxR) {
+                            float dist = length(delta);
+                            float waveFront = age * 3.4;
+                            float ringDist = abs(dist - waveFront);
+                            // Anel principal de espuma que se expande e dissolve em bolhas
+                            float ringFoam = exp(-ringDist * ringDist * 2.8) * exp(-age * 1.05 * uRippleDamping);
+                            // Turbilhão central de bolhas no ponto exato onde o objeto/dedo bateu na água
+                            float splashCore = exp(-dist * dist * 2.2) * exp(-age * 1.65);
+                            energy += (ringFoam * 1.45 + splashCore * 2.10) * clamp(rp.w * 7.5, 0.0, 1.8);
+                        }
+                    }
+                }
+
+                // 2. Colar de espuma e marola ao redor das boias e esferas flutuantes
+                for (int i = 0; i < 6; i++) {
+                    vec4 obj = uFloatingObjects[i];
+                    if (obj.w > 0.01) {
+                        float d = length(xz - obj.xz);
+                        float collarDist = d - obj.w * 0.92;
+                        if (collarDist > -0.25 && collarDist < 1.15) {
+                            float collar = exp(-collarDist * collarDist * 9.5) * smoothstep(-0.22, 0.02, collarDist);
+                            float wakeRing = (0.5 + 0.5 * sin(collarDist * 14.0 - uTime * 5.5)) * exp(-max(0.0, collarDist) * 2.8);
+                            energy += (collar * 0.85 + wakeRing * 0.42) * (0.45 + 0.55 * clamp(uWaveHeight, 0.2, 1.5));
+                        }
+                    }
+                }
+
+                // 3. Espuma ao redor do casco do barco ancorado e pilares do píer no modo Oceano
+                if (uSceneMode > 0.5) {
+                    vec2 boatRel = xz - vec2(14.6, 2.35);
+                    // Elipse ajustada ao formato do casco do barco (3.4m x 1.25m)
+                    float boatEllip = length(boatRel / vec2(1.75, 0.68));
+                    float hullCollar = abs(boatEllip - 1.0);
+                    if (hullCollar < 0.65) {
+                        energy += exp(-hullCollar * hullCollar * 14.0) * (0.55 + 0.45 * uWaveHeight);
+                    }
+                }
+
+                return clamp(energy, 0.0, 2.0);
             }
 
             // Analytical Island & Seabed Heightfield in GLSL (100% Synced with CPU)
@@ -2220,12 +2351,21 @@
                 return sky;
             }
 
+            // Função de Distribuição Normal GGX / Trowbridge-Reitz para Brilho Solar na Água
+            float distributionGGX(vec3 N, vec3 H, float roughness) {
+                float a = roughness * roughness;
+                float a2 = a * a;
+                float NdotH = max(0.0, dot(N, H));
+                float NdotH2 = NdotH * NdotH;
+                float denom = (NdotH2 * (a2 - 1.0) + 1.0);
+                return a2 / max(0.00001, 3.14159265 * denom * denom);
+            }
+
             void main() {
                 bool isOcean = (uSceneMode > 0.5);
                 float exactTerrainH = -3.1;
                 if (isOcean) {
                     exactTerrainH = evaluateIslandBathymetry(vWorldPos.xz);
-                    // Impede que a malha da água seja desenhada dentro da terra firme da ilha
                     if (exactTerrainH > vWorldPos.y + 0.025) {
                         discard;
                     }
@@ -2237,13 +2377,87 @@
 
                 vec4 wave = evaluateWaveField(vWorldPos.xz);
 
-                float microFade = 1.0 / (1.0 + viewDist * 0.025);
-                vec2 microUV1 = vWorldPos.xz * 4.2 + vec2(uTime * 0.45, -uTime * 0.35);
-                vec2 microUV2 = vWorldPos.xz * 7.8 - vec2(uTime * 0.55, uTime * 0.40);
-                float m1 = (noise2D(microUV1) - 0.5) * 0.015 * uWaveHeight * microFade;
-                float m2 = (noise2D(microUV2) - 0.5) * 0.010 * uWaveHeight * microFade;
+                // =====================================================================
+                // 1. MICRO-ONDAS CAPILARES EM 3 ESCALAS (PARA GLINTS E RELEVO LÍQUIDO)
+                // =====================================================================
+                float microFade = 1.0 / (1.0 + viewDist * 0.022);
+                float capAmp = (0.018 + 0.028 * clamp(uWaveHeight, 0.15, 1.8)) * microFade;
 
-                vec3 surfaceNormal = normalize(vec3(-(wave.y + m1), 1.0, -(wave.z + m2)));
+                vec2 capUV1 = vWorldPos.xz * 4.4 + vec2(uTime * 0.52, -uTime * 0.38) * uWaveSpeed;
+                vec2 capUV2 = vWorldPos.xz * 9.8 + vec2(-uTime * 0.64, uTime * 0.48) * uWaveSpeed;
+                vec2 capUV3 = vWorldPos.xz * 21.5 + vec2(uTime * 0.85, uTime * 0.72) * uWaveSpeed;
+
+                float nCap1X = noise2D(capUV1 + vec2(0.15, 0.0)) - noise2D(capUV1 - vec2(0.15, 0.0));
+                float nCap1Z = noise2D(capUV1 + vec2(0.0, 0.15)) - noise2D(capUV1 - vec2(0.0, 0.15));
+                float nCap2X = noise2D(capUV2 + vec2(0.15, 0.0)) - noise2D(capUV2 - vec2(0.15, 0.0));
+                float nCap2Z = noise2D(capUV2 + vec2(0.0, 0.15)) - noise2D(capUV2 - vec2(0.0, 0.15));
+                float nCap3X = noise2D(capUV3) - 0.5;
+                float nCap3Z = noise2D(capUV3.yx + vec2(3.7, 1.2)) - 0.5;
+
+                vec2 capillarySlope = (vec2(nCap1X, nCap1Z) * 1.15 +
+                                       vec2(nCap2X, nCap2Z) * 0.75 +
+                                       vec2(nCap3X, nCap3Z) * 0.55) * capAmp;
+
+                // =====================================================================
+                // 2. CÁLCULO FÍSICO DE ESPUMA (5 FONTES COMBINADAS + VORONOI 3D)
+                // =====================================================================
+                float interactiveFoamEnergy = evaluateInteractiveFoamSources(vWorldPos.xz);
+                float totalRawFoamEnergy = 0.0;
+
+                if (!isOcean) {
+                    // Na Piscina: Espuma nas ondas de toque/objetos + espuma de batida na borda de azulejos
+                    float wallProximity = min(7.0 - abs(vWorldPos.x), 5.0 - abs(vWorldPos.z));
+                    float wallWaveSlosh = clamp(abs(vWaveElevation) * 6.5 + max(0.0, -wave.w) * 0.35, 0.0, 1.5);
+                    float copingFroth = (1.0 - smoothstep(0.0, 0.28, wallProximity)) * (0.35 + 0.85 * wallWaveSlosh);
+                    float poolCrestBreak = smoothstep(0.45, 1.15, -wave.w * 0.32 * uWaveChoppy);
+
+                    totalRawFoamEnergy = (interactiveFoamEnergy * 0.95 + copingFroth * 0.75 + poolCrestBreak * 0.65) * uFoamIntensity;
+                } else {
+                    // No Oceano & Ilha:
+                    // A) Quebra de crista trocoidal (Jacobian whitecaps) com cauda na encosta da onda
+                    vec2 windDir = normalize(vec2(0.85, 0.35));
+                    float leewardSlope = clamp(dot(wave.yz, windDir) * 0.85 + 0.35, 0.0, 1.4);
+                    float crestCompression = max(0.0, -wave.w) * 0.48 * uWaveChoppy + max(0.0, vWaveElevation) * 0.65;
+                    float whitecapEnergy = smoothstep(0.26, 0.82, crestCompression * (0.75 + 0.45 * leewardSlope));
+
+                    // B) Rebentações na praia e recife (3 trens assimétricos de Swash & Backwash)
+                    float shoreDepth = max(0.0, vWorldPos.y - exactTerrainH);
+                    float warpNoise = noise2D(vWorldPos.xz * 0.85 + vec2(uTime * 0.15));
+
+                    // Onda dente-de-serra assimétrica: frente de espuma aguda avançando para a areia e cauda rendilhada recuando
+                    float surfPhase = shoreDepth * 1.45 - uTime * 0.58 * uWaveSpeed + warpNoise * 0.42;
+                    float surfFract = fract(surfPhase);
+                    float boreFront = smoothstep(0.0, 0.14, surfFract) * (1.0 - smoothstep(0.14, 0.32, surfFract));
+                    float backwashLace = (1.0 - surfFract) * smoothstep(0.02, 0.25, surfFract) * 0.72;
+
+                    // Segundo trem harmônico defasado para naturalidade
+                    float surfPhase2 = shoreDepth * 2.35 - uTime * 0.74 * uWaveSpeed - warpNoise * 0.35 + 0.45;
+                    float surfFract2 = fract(surfPhase2);
+                    float boreFront2 = smoothstep(0.0, 0.16, surfFract2) * (1.0 - smoothstep(0.16, 0.38, surfFract2));
+
+                    float surfZoneEnvelope = (1.0 - smoothstep(0.15, 2.45, shoreDepth)) * smoothstep(-0.15, 0.02, shoreDepth);
+                    float beachWaterline = (1.0 - smoothstep(0.0, 0.26, shoreDepth)) * 0.95;
+
+                    // C) Espuma sobre a crista rasa do anel de recife de corais
+                    float reefBreaker = (1.0 - smoothstep(0.35, 1.85, shoreDepth)) * smoothstep(0.08, 0.35, abs(vWaveElevation)) * 0.65;
+
+                    float shoreTotalEnergy = surfZoneEnvelope * (boreFront * 1.25 + backwashLace + boreFront2 * 0.65) +
+                                             beachWaterline + reefBreaker;
+
+                    totalRawFoamEnergy = (shoreTotalEnergy * 0.95 + whitecapEnergy * 0.92 + interactiveFoamEnergy * 0.90) * uFoamIntensity;
+                }
+
+                // Avalia a rede celular Voronoi 3D da espuma
+                vec3 foamData = evaluateMultiScaleFoam(vWorldPos.xz, wave.yz, clamp(totalRawFoamEnergy, 0.0, 1.6), microFade);
+                float foamMask = foamData.x;
+                vec2 foamBumpSlope = foamData.yz * (0.085 * foamMask);
+
+                // Normal final da superfície (Ondas Gerstner + Ondas Capilares + Relevo 3D das Bolhas de Espuma)
+                vec3 surfaceNormal = normalize(vec3(
+                    -(wave.y + capillarySlope.x + foamBumpSlope.x),
+                    1.0,
+                    -(wave.z + capillarySlope.y + foamBumpSlope.y)
+                ));
 
                 bool cameraAboveWater = (uCameraPos.y >= vWorldPos.y);
                 vec3 orientedNormal = cameraAboveWater ? surfaceNormal : -surfaceNormal;
@@ -2266,7 +2480,6 @@
                 }
 
                 vec2 ndc = (vClipPos.xy / max(0.001, vClipPos.w)) * 0.5 + 0.5;
-                // Reduz a distorção de refração na linha rasa da praia para não puxar pixels da montanha
                 float shoreRefrAtten = isOcean ? smoothstep(0.0, 0.75, max(0.0, vWorldPos.y - exactTerrainH)) : 1.0;
                 vec2 refrOffset = orientedNormal.xz * (0.065 * (uIOR - 1.0) / 0.333) * shoreRefrAtten;
 
@@ -2318,6 +2531,9 @@
                     refractedSceneColor = mix(rttRefraction, analyticalSeabed, 0.32);
                 }
 
+                // =====================================================================
+                // 3. BRILHO SUPERFICIAL GGX + GLINTS ESTOCÁSTICOS ("DIAMANTES DE SOL")
+                // =====================================================================
                 vec3 finalColor;
                 if (cameraAboveWater) {
                     vec3 sigma = vec3(0.34, 0.075, 0.028) * uAbsorptionScale;
@@ -2327,10 +2543,11 @@
                     float depthFactor = clamp(waterPathLength / maxDepthNorm, 0.0, 1.0);
                     vec3 volumeTint = mix(uWaterShallowColor, uWaterDeepColor, depthFactor);
 
+                    // Subsurface Scattering (SSS) turquesa esmeralda através das cristas das ondas
                     float blDot = clamp(dot(viewDir, normalize(-uSunDir + surfaceNormal * 0.65)), 0.0, 1.0);
                     float backLight = blDot * blDot * blDot;
-                    float crestFactor = smoothstep(-0.02, 0.14, vWaveElevation);
-                    vec3 sssGlow = uWaterShallowColor * (backLight * (0.45 + crestFactor * 1.15) * 0.58);
+                    float crestFactor = smoothstep(-0.02, 0.16, vWaveElevation);
+                    vec3 sssGlow = uWaterShallowColor * (backLight * (0.48 + crestFactor * 1.25) * 0.62);
 
                     vec3 transmittedColor = refractedSceneColor * transmittance + volumeTint * (1.0 - transmittance) * 0.76 + sssGlow;
 
@@ -2338,11 +2555,38 @@
                     reflDir.y = max(0.02, reflDir.y);
                     vec3 reflectedColor = evaluateSkyReflection(reflDir);
 
+                    // Vetor meia-luz (Half-Vector) entre o Sol e a Câmera
                     vec3 halfVec = normalize(uSunDir + viewDir);
-                    float NdotH = max(0.0001, dot(orientedNormal, halfVec));
-                    float sunSpecCore = pow(NdotH, 720.0) * 4.8;
-                    float sunSpecShimmer = pow(NdotH, 48.0) * 0.38;
-                    vec3 specularGlint = uSunColor * (sunSpecCore + sunSpecShimmer);
+
+                    // Camada 1: Coluna Solar Microfacetada GGX (caminho luminoso sobre a água)
+                    float baseRoughness = clamp(0.042 + 0.032 * uWaveHeight, 0.035, 0.12);
+                    float ggxCore = distributionGGX(orientedNormal, halfVec, baseRoughness) * 0.22;
+                    float ggxBroad = distributionGGX(orientedNormal, halfVec, baseRoughness * 2.8) * 0.045;
+
+                    // Camada 2: Cintilação Estocástica de Micro-Facetas (Glints brancos vivos que dançam nas ondas)
+                    vec3 glintNormal = normalize(vec3(
+                        -(wave.y * 0.85 + capillarySlope.x * 3.4),
+                        1.0,
+                        -(wave.z * 0.85 + capillarySlope.y * 3.4)
+                    ));
+                    float NdotH_glint = max(0.0, dot(glintNormal, halfVec));
+
+                    // Máscara celular cintilante que isola facetas individuais refletindo o disco solar
+                    vec2 sparkleGrid1 = vWorldPos.xz * 14.5 + vec2(uTime * 0.8, -uTime * 0.6);
+                    vec2 sparkleGrid2 = vWorldPos.xz * 23.0 - vec2(uTime * 0.9, uTime * 0.75);
+                    float sparkleMask = smoothstep(0.62, 0.94, noise2D(sparkleGrid1) * 0.55 + noise2D(sparkleGrid2) * 0.45);
+
+                    float diamondSparkles = pow(NdotH_glint, 180.0) * sparkleMask * 6.5 +
+                                            pow(NdotH_glint, 950.0) * 8.0;
+
+                    // A espuma densa é fosca, portanto atenua o reflexo especular onde há espuma grossa
+                    float wetSpecularMask = 1.0 - smoothstep(0.25, 0.85, foamMask) * 0.82;
+                    float glintScale = uSunGlintIntensity * wetSpecularMask;
+
+                    // Combina cor solar quente na borda do reflexo com núcleo branco puro incandescente
+                    vec3 sunWhiteCore = mix(uSunColor, vec3(1.0, 0.995, 0.98), 0.72);
+                    vec3 specularGlint = (uSunColor * (ggxBroad + ggxCore * 0.65) +
+                                          sunWhiteCore * (ggxCore * 0.55 + diamondSparkles)) * glintScale;
 
                     finalColor = mix(transmittedColor, reflectedColor, fresnel) + specularGlint;
                 } else {
@@ -2351,34 +2595,43 @@
                     finalColor = mix(skyThroughWindow * 1.15, internalReflColor, fresnel);
                 }
 
+                // =====================================================================
+                // 4. COMPOSIÇÃO FÍSICA DA ESPUMA (ALBEDO + SSS + SOMBREAMENTO 3D)
+                // =====================================================================
+                if (foamMask > 0.005) {
+                    // Iluminação difusa 3D nas bolhas da espuma + espalhamento subsuperficial turquesa
+                    float foamNdotL = max(0.32, dot(orientedNormal, uSunDir));
+                    float sunElev = max(0.18, uSunDir.y);
+
+                    // Bordas finas da espuma absorvem um leve tom ciano/turquesa da água; o núcleo é branco neve
+                    float coreThickness = smoothstep(0.18, 0.72, foamMask);
+                    vec3 thinBubbleTint = mix(uWaterShallowColor * 0.45 + vec3(0.62, 0.68, 0.72), vec3(0.98, 0.99, 1.0), coreThickness);
+
+                    // Brilho úmido (wet sheen) nas bolhas recém-formadas
+                    vec3 halfVec = normalize(uSunDir + viewDir);
+                    float bubbleSheen = pow(max(0.0, dot(orientedNormal, halfVec)), 36.0) * 0.35 * uSunGlintIntensity;
+
+                    vec3 litFoamColor = thinBubbleTint * (mix(vec3(0.78, 0.86, 0.94), uSunColor, 0.55) * (0.55 + 0.52 * foamNdotL * sunElev)) +
+                                        vec3(1.0) * bubbleSheen;
+
+                    finalColor = mix(finalColor, litFoamColor, foamMask);
+                }
+
+                // Menisco óptico sutil nas bordas de azulejo da piscina
                 if (!isOcean) {
                     float wallProximity = min(7.0 - abs(vWorldPos.x), 5.0 - abs(vWorldPos.z));
-                    float meniscus = (1.0 - smoothstep(0.0, 0.12, wallProximity)) * 0.28;
-                    finalColor += vec3(0.85, 0.96, 1.0) * meniscus;
+                    float meniscus = (1.0 - smoothstep(0.0, 0.09, wallProximity)) * 0.24;
+                    finalColor += vec3(0.90, 0.98, 1.0) * meniscus;
                 } else {
-                    float foamNoise = noise2D(vWorldPos.xz * 3.8 + vec2(uTime * 0.4)) * 0.65 +
-                                      noise2D(vWorldPos.xz * 9.5 - vec2(uTime * 0.7)) * 0.35;
-
-                    float shoreDist = max(0.0, vWorldPos.y - exactTerrainH);
-                    float surfWave = sin(shoreDist * 6.5 - uTime * 3.6 + foamNoise * 2.5);
-                    float shoreFoamBand = (1.0 - smoothstep(0.02, 1.65, shoreDist));
-                    float breakingSurf = shoreFoamBand * smoothstep(0.15, 0.85, surfWave * 0.5 + 0.5 + foamNoise * 0.35);
-                    float waterlineEdge = (1.0 - smoothstep(0.0, 0.22, shoreDist)) * 0.92;
-
-                    float steepCrest = clamp(-wave.w * 0.42 * uWaveChoppy + vWaveElevation * 0.55, 0.0, 1.5);
-                    float whitecapMask = smoothstep(0.32, 0.78, steepCrest * (0.65 + 0.55 * foamNoise));
-
-                    float totalFoam = clamp((breakingSurf * 0.95 + waterlineEdge + whitecapMask * 0.85) * uFoamIntensity, 0.0, 1.0);
-                    vec3 foamAlbedo = vec3(0.94, 0.98, 1.0) * (0.75 + 0.25 * max(0.2, uSunDir.y));
-                    finalColor = mix(finalColor, foamAlbedo, totalFoam);
-
+                    // Neblina atmosférica suave no horizonte oceânico
                     float horizonFog = smoothstep(75.0, 215.0, viewDist);
                     vec3 horizonSkyCol = evaluateSkyReflection(normalize(vec3(-viewDir.x, 0.03, -viewDir.z)));
                     finalColor = mix(finalColor, horizonSkyCol, horizonFog);
                 }
 
-                finalColor = finalColor / (1.0 + finalColor * 0.14);
-                gl_FragColor = vec4(finalColor, 1.0);
+                // Tone mapping que preserva a brancura viva da espuma e o estalo dos glints solares
+                vec3 mapped = finalColor / (1.0 + finalColor * 0.075);
+                gl_FragColor = vec4(clamp(mapped, 0.0, 1.0), 1.0);
             }
         `;
         // === FIM DA PARTE 1 — COLE A PARTE 2 LOGO ABAIXO DESTA LINHA ===
@@ -2392,7 +2645,7 @@
         const sharedUniformNames = [
             "world", "viewProjection", "uTime", "uSceneMode", "uWaveOctaves",
             "uActiveRippleCount", "uWaveHeight", "uWaveChoppy", "uWaveSpeed",
-            "uFoamIntensity", "uWaveDirSpread", "uWaveSwellScale",
+            "uFoamIntensity", "uSunGlintIntensity", "uWaveDirSpread", "uWaveSwellScale",
             "uRippleDamping", "uCausticsIntensity", "uUnderwaterLEDs", "uTileStyle",
             "uAbsorptionScale", "uSunDir", "uSunColor", "uWaterShallowColor",
             "uWaterDeepColor", "uRipples", "uFloatingObjects", "uCameraPos",
@@ -2443,6 +2696,7 @@
             mat.setFloat("uWaveChoppy", simState.waveChoppy);
             mat.setFloat("uWaveSpeed", simState.waveSpeed);
             mat.setFloat("uFoamIntensity", simState.foamIntensity);
+            mat.setFloat("uSunGlintIntensity", simState.sunGlintIntensity);
             mat.setFloat("uWaveDirSpread", simState.waveDirSpread);
             mat.setFloat("uWaveSwellScale", simState.waveSwellScale);
             mat.setFloat("uRippleDamping", simState.rippleDamping);
@@ -4118,6 +4372,10 @@
         document.getElementById('sliderFoamIntensity').addEventListener('input', (e) => {
             simState.foamIntensity = parseFloat(e.target.value);
             document.getElementById('valFoamIntensity').textContent = simState.foamIntensity.toFixed(2) + "x";
+        });
+        document.getElementById('sliderSunGlint').addEventListener('input', (e) => {
+            simState.sunGlintIntensity = parseFloat(e.target.value);
+            document.getElementById('valSunGlint').textContent = simState.sunGlintIntensity.toFixed(2) + "x";
         });
         document.getElementById('sliderRippleStrength').addEventListener('input', (e) => {
             simState.rippleStrength = parseFloat(e.target.value);
