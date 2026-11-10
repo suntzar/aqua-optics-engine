@@ -315,9 +315,7 @@
     // ========================================================================
     let _shadersRegistered = false;
 
-    function registerShaders() {
-        if (_shadersRegistered) return;
-        const SHARED_WATER_GLSL = `
+    const SHARED_WATER_GLSL = `
         uniform float uTime;
         uniform float uSceneMode;
         uniform float uWaveOctaves;
@@ -813,6 +811,9 @@
             return litColor;
         }
     `;
+
+    function registerShaders() {
+        if (_shadersRegistered) return;
 
     // -------------------------------------------------------------------------
     // SHADER 0: ATMOSPHERIC SKY DOME SHADER
@@ -1463,8 +1464,6 @@
             gl_FragColor = vec4(clamp(mapped, 0.0, 1.0), 1.0);
         }
     `;
-    // === FIM DA PARTE 1 — COLE A PARTE 2 LOGO ABAIXO DESTA LINHA ===
-    // === INÍCIO DA PARTE 2 — COLE LOGO ABAIXO DA PARTE 1 ===
         _shadersRegistered = true;
     }
 
