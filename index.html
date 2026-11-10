@@ -1552,118 +1552,37 @@
                 return mix(mix(a, b, f.x), mix(c, d, f.x), f.y);
             }
 
-            // Rede Celular de Voronoi (Fronteiras de Plateau: d2 - d1 forma paredes de bolhas reais)
-            vec2 voronoiBubbleCells(vec2 x) {
-                vec2 n = floor(x);
-                vec2 f = fract(x);
-                float d1 = 8.0;
-                float d2 = 8.0;
-                for (int j = -1; j <= 1; j++) {
-                    for (int i = -1; i <= 1; i++) {
-                        vec2 g = vec2(float(i), float(j));
-                        vec2 o = hash22(n + g);
-                        vec2 r = g + (0.15 + 0.70 * o) - f;
-                        float d = dot(r, r);
-                        if (d < d1) {
-                            d2 = d1;
-                            d1 = d;
-                        } else if (d < d2) {
-                            d2 = d;
-                        }
-                    }
-                }
-                return vec2(sqrt(max(0.0, d1)), sqrt(max(0.0, d2)));
-            }
+            // Calcula colar de espuma quebrado e orgânico apenas ao redor de objetos flutuantes
+            float evaluateObjectWakeFoam(vec2 xz) {
+                float wakeEnergy = 0.0;
+                float nBreak = noise2D(xz * 3.8 + vec2(uTime * 0.65, -uTime * 0.55));
 
-            // Avalia a estrutura multi-escala da espuma (Filamentos + Rendilhado de Bolhas + Micro-Espuma)
-            vec3 evaluateMultiScaleFoam(vec2 worldXZ, vec2 waveSlope, float rawFoamEnergy, float distAtten) {
-                if (rawFoamEnergy <= 0.005) return vec3(0.0);
-
-                // Distorção de domínio (advection) guiada pela inclinação da onda e deriva do vento
-                vec2 drift = vec2(uTime * 0.22, -uTime * 0.16) * uWaveSpeed;
-                vec2 warpedUV = worldXZ + waveSlope * 0.65;
-
-                // Camada 1: Células macro de espuma (rendilhado largo de esteira)
-                vec2 vMacro = voronoiBubbleCells(warpedUV * 2.15 + drift);
-                float macroWeb = 1.0 - smoothstep(0.02, 0.26, vMacro.y - vMacro.x);
-
-                // Camada 2: Bolhas intermediárias (aglomerados de espuma aerada)
-                vec2 vMid = voronoiBubbleCells(warpedUV * 5.80 - drift * 1.4 + vec2(vMacro.x * 0.35));
-                float midBubbles = 1.0 - smoothstep(0.03, 0.30, vMid.y - vMid.x);
-                float bubbleCores = smoothstep(0.32, 0.05, vMid.x);
-
-                // Camada 3: Micro-espuma de alta frequência para dar textura porosa ao núcleo branco
-                float microFroth = noise2D(warpedUV * 18.5 + drift * 2.2) * 0.6 +
-                                   noise2D(warpedUV * 36.0 - drift * 3.0) * 0.4;
-
-                // Combinação hierárquica: bordas rendilhadas vazadas -> centro branco denso
-                float laceStructure = clamp(macroWeb * 0.62 + midBubbles * 0.52 + bubbleCores * 0.25, 0.0, 1.0);
-                float porousCore = smoothstep(0.38, 0.88, rawFoamEnergy) * (0.78 + 0.22 * microFroth);
-
-                // Threshold progressivo: energias baixas mostram apenas os filamentos da rede celular;
-                // energias altas preenchem as células formando a crista branca densa (whitecap)
-                float cellMask = smoothstep(0.58 - rawFoamEnergy * 0.52, 0.92 - rawFoamEnergy * 0.35, laceStructure);
-                float finalFoamMask = clamp(mix(cellMask * rawFoamEnergy * 1.35, 1.0, porousCore), 0.0, 1.0);
-
-                // Gradiente de relevo 3D das bolhas para perturbar a normal da água
-                float foamHeightGradX = (vMid.x - 0.35) * (midBubbles + microFroth * 0.5) * distAtten;
-                float foamHeightGradZ = (vMacro.x - 0.35) * (macroWeb + microFroth * 0.5) * distAtten;
-
-                return vec3(finalFoamMask, foamHeightGradX, foamHeightGradZ);
-            }
-
-            // Calcula a energia de espuma gerada por ondas de toque/mouse, chuva e colisão com boias/barco
-            float evaluateInteractiveFoamSources(vec2 xz) {
-                float energy = 0.0;
-
-                // 1. Espuma aerada nos anéis de impacto (toque na água, onda de choque e gotas de chuva)
-                int activeCount = int(uActiveRippleCount + 0.1);
-                for (int i = 0; i < 32; i++) {
-                    if (i >= activeCount) break;
-                    vec4 rp = uRipples[i];
-                    float age = uTime - rp.z;
-                    if (age > 0.0 && age < 3.4) {
-                        vec2 delta = xz - rp.xy;
-                        float maxR = age * 3.4 + 1.8;
-                        if (abs(delta.x) < maxR && abs(delta.y) < maxR) {
-                            float dist = length(delta);
-                            float waveFront = age * 3.4;
-                            float ringDist = abs(dist - waveFront);
-                            // Anel principal de espuma que se expande e dissolve em bolhas
-                            float ringFoam = exp(-ringDist * ringDist * 2.8) * exp(-age * 1.05 * uRippleDamping);
-                            // Turbilhão central de bolhas no ponto exato onde o objeto/dedo bateu na água
-                            float splashCore = exp(-dist * dist * 2.2) * exp(-age * 1.65);
-                            energy += (ringFoam * 1.45 + splashCore * 2.10) * clamp(rp.w * 7.5, 0.0, 1.8);
-                        }
-                    }
-                }
-
-                // 2. Colar de espuma e marola ao redor das boias e esferas flutuantes
                 for (int i = 0; i < 6; i++) {
                     vec4 obj = uFloatingObjects[i];
                     if (obj.w > 0.01) {
-                        float d = length(xz - obj.xz);
-                        float collarDist = d - obj.w * 0.92;
-                        if (collarDist > -0.25 && collarDist < 1.15) {
-                            float collar = exp(-collarDist * collarDist * 9.5) * smoothstep(-0.22, 0.02, collarDist);
-                            float wakeRing = (0.5 + 0.5 * sin(collarDist * 14.0 - uTime * 5.5)) * exp(-max(0.0, collarDist) * 2.8);
-                            energy += (collar * 0.85 + wakeRing * 0.42) * (0.45 + 0.55 * clamp(uWaveHeight, 0.2, 1.5));
+                        vec2 dVec = xz - obj.xz;
+                        float dist = length(dVec);
+                        float collarDist = dist - obj.w * 0.96;
+                        // Filamentos finos e interrompidos ao redor da boia (sem anel grosso borrado)
+                        if (collarDist > -0.08 && collarDist < 0.55) {
+                            float thinRing = exp(-collarDist * collarDist * 38.0) * smoothstep(-0.06, 0.01, collarDist);
+                            float secondaryRipple = exp(-pow(collarDist - 0.24, 2.0) * 65.0) * 0.55;
+                            wakeEnergy += (thinRing + secondaryRipple) * smoothstep(0.28, 0.78, nBreak) * (0.35 + 0.65 * clamp(uWaveHeight, 0.15, 1.4));
                         }
                     }
                 }
 
-                // 3. Espuma ao redor do casco do barco ancorado e pilares do píer no modo Oceano
                 if (uSceneMode > 0.5) {
                     vec2 boatRel = xz - vec2(14.6, 2.35);
-                    // Elipse ajustada ao formato do casco do barco (3.4m x 1.25m)
-                    float boatEllip = length(boatRel / vec2(1.75, 0.68));
-                    float hullCollar = abs(boatEllip - 1.0);
-                    if (hullCollar < 0.65) {
-                        energy += exp(-hullCollar * hullCollar * 14.0) * (0.55 + 0.45 * uWaveHeight);
+                    float boatEllip = length(boatRel / vec2(1.72, 0.65));
+                    float hullDist = boatEllip - 1.0;
+                    if (hullDist > -0.06 && hullDist < 0.45) {
+                        float hullLace = exp(-hullDist * hullDist * 42.0) * smoothstep(0.25, 0.80, nBreak);
+                        wakeEnergy += hullLace * (0.45 + 0.55 * clamp(uWaveHeight, 0.2, 1.5));
                     }
                 }
 
-                return clamp(energy, 0.0, 2.0);
+                return clamp(wakeEnergy, 0.0, 1.25);
             }
 
             // Analytical Island & Seabed Heightfield in GLSL (100% Synced with CPU)
@@ -1702,9 +1621,10 @@
                 return max(-11.5, mainPeak + headland + eastHill + beachDome + shelfDrop + coralReefCrest - 1.05);
             }
 
-            // Evaluates wave height (x), analytical slope dH/dx, dH/dz (y, z) and Laplacian / Jacobian foam metric (w)
-            vec4 evaluateWaveFieldEx(vec2 xz, out vec2 gerstnerHorizontalXZ) {
+            // Avalia altura (x), inclinação dH/dx, dH/dz (y, z), Laplaciano (w) + energia de espuma de ripples (out)
+            vec4 evaluateWaveFieldFull(vec2 xz, out vec2 gerstnerHorizontalXZ, out float rippleFoamOut) {
                 gerstnerHorizontalXZ = vec2(0.0);
+                rippleFoamOut = 0.0;
                 float wh = uWaveHeight;
                 float ws = uWaveSpeed * uTime;
                 bool isOcean = (uSceneMode > 0.5);
@@ -1757,7 +1677,7 @@
                     laplacian += -s3 * dot(d3, d3) * a3;
                     gerstnerHorizontalXZ -= d3 * (c3 * a3 * chop * 0.75);
 
-                    // Octave 4 & 5: Medium Chop Harmonics (Evaluated on Medium, High, Ultra)
+                    // Octave 4 & 5: Medium Chop Harmonics
                     if (uWaveOctaves >= 4.5) {
                         vec2 d4 = vec2(-1.75, -0.65) * freqMult;
                         float p4 = dot(xz, d4) + ws * 3.2;
@@ -1778,7 +1698,7 @@
                         laplacian += -s5 * dot(d5, d5) * a5;
                     }
 
-                    // Octave 6 & 7: High-Frequency Capillary Detail (High & Ultra)
+                    // Octave 6 & 7: High-Frequency Capillary Detail
                     if (uWaveOctaves >= 5.5) {
                         float p6 = (xz.x * 3.4 + xz.y * 2.7) * freqMult - ws * 4.3;
                         float p7 = (-xz.x * 2.9 + xz.y * 3.8) * freqMult + ws * 3.9;
@@ -1798,7 +1718,7 @@
                     }
                 }
 
-                // OPTIMIZED COMPACT RIPPLE LOOP: Early-out break using float comparison
+                // LOOP ÚNICO COMPACTO DE ONDAS INTERATIVAS (Física + Espuma da Crista de Propagação)
                 int activeCount = int(uActiveRippleCount + 0.1);
                 for (int i = 0; i < 32; i++) {
                     if (i >= activeCount) break;
@@ -1820,15 +1740,27 @@
                         dx += delta.x * dWave;
                         dz += delta.y * dWave;
                         laplacian += -s * 42.0 * contrib;
+
+                        // A espuma acompanha apenas as cristas positivas (s > 0.15) do anel em propagação,
+                        // evitando qualquer mancha circular sólida no centro!
+                        float crestRing = smoothstep(0.15, 0.92, s) * exp(-radialDiff * radialDiff * 2.2);
+                        float ageFade = exp(-age * 1.15 * uRippleDamping) * smoothstep(0.0, 0.08, age);
+                        rippleFoamOut += crestRing * ageFade * clamp(rp.w * 6.2, 0.0, 1.35);
                     }
                 }
 
                 return vec4(h, dx, dz, laplacian);
             }
 
+            vec4 evaluateWaveFieldEx(vec2 xz, out vec2 gerstnerHorizontalXZ) {
+                float dummyFoam;
+                return evaluateWaveFieldFull(xz, gerstnerHorizontalXZ, dummyFoam);
+            }
+
             vec4 evaluateWaveField(vec2 xz) {
                 vec2 dummy;
-                return evaluateWaveFieldEx(xz, dummy);
+                float dummyFoam;
+                return evaluateWaveFieldFull(xz, dummy, dummyFoam);
             }
 
             // Procedural High-Resolution Ceramic Mosaic Pool Tiles
@@ -2315,6 +2247,7 @@
             uniform vec3 uSkyZenithColor;
             uniform vec3 uSkyHorizonColor;
             uniform sampler2D uRefractionSampler;
+            uniform sampler2D uFoamSampler;
 
             ${SHARED_WATER_GLSL}
 
@@ -2351,7 +2284,6 @@
                 return sky;
             }
 
-            // Função de Distribuição Normal GGX / Trowbridge-Reitz para Brilho Solar na Água
             float distributionGGX(vec3 N, vec3 H, float roughness) {
                 float a = roughness * roughness;
                 float a2 = a * a;
@@ -2361,13 +2293,69 @@
                 return a2 / max(0.00001, 3.14159265 * denom * denom);
             }
 
+            // =====================================================================
+            // TEXTURE-DRIVEN CELLULAR FOAM ENGINE (ESTILO SEA OF THIEVES / AAA)
+            // Usa o mapa uFoamSampler (R = Rede de Bolhas, G = Micro-Espuma, B = Aglomerados)
+            // com Erosão por Limiar para nunca gerar manchas brancas chapadas ou borradas.
+            // =====================================================================
+            vec4 sampleTexturedFoam(vec2 worldXZ, vec2 waveSlope, float rawEnergy, float viewDist) {
+                if (rawEnergy <= 0.015 || viewDist > 165.0) return vec4(0.0);
+
+                float distFade = 1.0 - smoothstep(85.0, 160.0, viewDist);
+                float e = clamp(rawEnergy * distFade, 0.0, 1.35);
+
+                // Duas coordenadas UV com advecção cruzada e distorção pela inclinação da onda
+                vec2 flow1 = vec2(uTime * 0.045, -uTime * 0.032) * uWaveSpeed;
+                vec2 flow2 = vec2(-uTime * 0.038, uTime * 0.051) * uWaveSpeed;
+                vec2 warpedXZ = worldXZ + waveSlope * 0.48;
+
+                // Rotação de 37 graus na segunda camada para eliminar qualquer repetição de grade
+                mat2 rot = mat2(0.80, -0.60, 0.60, 0.80);
+                vec2 uvMacro = warpedXZ * 0.34 + flow1;
+                vec2 uvDetail = (rot * warpedXZ) * 0.82 + flow2;
+
+                vec3 tex1 = texture2D(uFoamSampler, uvMacro).rgb;
+                vec3 tex2 = texture2D(uFoamSampler, uvDetail).rgb;
+
+                // Combina as paredes de bolhas grandes (R) com as micro-bolhas internas (G) e manchas (B)
+                float macroWeb = max(tex1.r, tex2.r * 0.82);
+                float microBubbles = tex1.g * 0.55 + tex2.g * 0.45;
+                float clusterMod = mix(0.65, 1.15, tex1.b * 0.6 + tex2.b * 0.4);
+
+                float modEnergy = clamp(e * clusterMod, 0.0, 1.25);
+
+                // EROSÃO POR TEXTURA (Key Technique):
+                // Em baixa energia: apenas os filamentos mais altos da rede (macroWeb) aparecem.
+                // Em alta energia: os poros se preenchem gradualmente com micro-bolhas (microBubbles),
+                // mantendo textura granulada real de espuma aerada (nunca fica liso/borrado!).
+                float bubbleField = mix(macroWeb, clamp(macroWeb * 0.65 + microBubbles * 0.72, 0.0, 1.0), smoothstep(0.35, 1.05, modEnergy));
+                float erosionThreshold = clamp(1.02 - modEnergy * 0.88, 0.14, 0.98);
+                float edgeSharpness = 0.08 + 0.06 * clamp(viewDist * 0.02, 0.0, 1.0);
+
+                float foamAlpha = smoothstep(erosionThreshold - edgeSharpness, erosionThreshold + edgeSharpness, bubbleField);
+                foamAlpha *= smoothstep(0.015, 0.14, modEnergy);
+
+                // Detalhe interno de porosidade (oclusão entre as bolhas para dar volume 3D)
+                float bubbleDetail = clamp(macroWeb * 0.55 + microBubbles * 0.65, 0.25, 1.0);
+
+                // Gradiente de relevo 3D extraído da textura de bolhas
+                vec2 bumpGrad = vec2(tex2.r - tex1.g, tex1.r - tex2.g) * foamAlpha * (1.0 / (1.0 + viewDist * 0.04));
+
+                return vec4(foamAlpha, bubbleDetail, bumpGrad.x, bumpGrad.y);
+            }
+
             void main() {
                 bool isOcean = (uSceneMode > 0.5);
+                // Otimização: só avalia a função completa de batimetria perto da ilha (vShoreDepth < 4.5)
                 float exactTerrainH = -3.1;
                 if (isOcean) {
-                    exactTerrainH = evaluateIslandBathymetry(vWorldPos.xz);
-                    if (exactTerrainH > vWorldPos.y + 0.025) {
-                        discard;
+                    if (vShoreDepth < 4.5) {
+                        exactTerrainH = evaluateIslandBathymetry(vWorldPos.xz);
+                        if (exactTerrainH > vWorldPos.y + 0.025) {
+                            discard;
+                        }
+                    } else {
+                        exactTerrainH = -vShoreDepth;
                     }
                 }
 
@@ -2375,7 +2363,9 @@
                 float viewDist = length(viewVector);
                 vec3 viewDir = viewVector / max(0.0001, viewDist);
 
-                vec4 wave = evaluateWaveField(vWorldPos.xz);
+                vec2 dummyHoriz;
+                float rippleFoamEnergy = 0.0;
+                vec4 wave = evaluateWaveFieldFull(vWorldPos.xz, dummyHoriz, rippleFoamEnergy);
 
                 // =====================================================================
                 // 1. MICRO-ONDAS CAPILARES EM 3 ESCALAS (PARA GLINTS E RELEVO LÍQUIDO)
@@ -2399,60 +2389,62 @@
                                        vec2(nCap3X, nCap3Z) * 0.55) * capAmp;
 
                 // =====================================================================
-                // 2. CÁLCULO FÍSICO DE ESPUMA (5 FONTES COMBINADAS + VORONOI 3D)
+                // 2. FONTES FÍSICAS DE ESPUMA (SEM FAIXAS ESTÁTICAS BORRADAS)
                 // =====================================================================
-                float interactiveFoamEnergy = evaluateInteractiveFoamSources(vWorldPos.xz);
+                float objectWakeEnergy = (viewDist < 65.0) ? evaluateObjectWakeFoam(vWorldPos.xz) : 0.0;
                 float totalRawFoamEnergy = 0.0;
 
                 if (!isOcean) {
-                    // Na Piscina: Espuma nas ondas de toque/objetos + espuma de batida na borda de azulejos
+                    // Na Piscina: Sem borda branca grossa fixa! A espuma só surge nas ondas
+                    // de propagação, nas boias ou quando a água bate agitada na parede.
                     float wallProximity = min(7.0 - abs(vWorldPos.x), 5.0 - abs(vWorldPos.z));
-                    float wallWaveSlosh = clamp(abs(vWaveElevation) * 6.5 + max(0.0, -wave.w) * 0.35, 0.0, 1.5);
-                    float copingFroth = (1.0 - smoothstep(0.0, 0.28, wallProximity)) * (0.35 + 0.85 * wallWaveSlosh);
-                    float poolCrestBreak = smoothstep(0.45, 1.15, -wave.w * 0.32 * uWaveChoppy);
+                    float wallSlosh = smoothstep(0.025, 0.12, abs(vWaveElevation)) * (1.0 - smoothstep(0.0, 0.16, wallProximity));
+                    float poolCrestBreak = smoothstep(0.55, 1.25, -wave.w * 0.30 * uWaveChoppy);
 
-                    totalRawFoamEnergy = (interactiveFoamEnergy * 0.95 + copingFroth * 0.75 + poolCrestBreak * 0.65) * uFoamIntensity;
+                    totalRawFoamEnergy = (rippleFoamEnergy * 0.92 + objectWakeEnergy * 0.85 + wallSlosh * 0.65 + poolCrestBreak * 0.55) * uFoamIntensity;
                 } else {
                     // No Oceano & Ilha:
-                    // A) Quebra de crista trocoidal (Jacobian whitecaps) com cauda na encosta da onda
+                    // A) Quebra de crista trocoidal (Whitecaps) com cauda de vento
                     vec2 windDir = normalize(vec2(0.85, 0.35));
-                    float leewardSlope = clamp(dot(wave.yz, windDir) * 0.85 + 0.35, 0.0, 1.4);
-                    float crestCompression = max(0.0, -wave.w) * 0.48 * uWaveChoppy + max(0.0, vWaveElevation) * 0.65;
-                    float whitecapEnergy = smoothstep(0.26, 0.82, crestCompression * (0.75 + 0.45 * leewardSlope));
+                    float leewardSlope = clamp(dot(wave.yz, windDir) * 0.85 + 0.30, 0.0, 1.35);
+                    float crestCompression = max(0.0, -wave.w) * 0.44 * uWaveChoppy + max(0.0, vWaveElevation) * 0.52;
+                    float whitecapEnergy = smoothstep(0.32, 0.92, crestCompression * (0.72 + 0.42 * leewardSlope));
 
-                    // B) Rebentações na praia e recife (3 trens assimétricos de Swash & Backwash)
+                    // B) Rebentações na praia: frentes de onda finas e rendilhadas (sem faixa grossa parada)
                     float shoreDepth = max(0.0, vWorldPos.y - exactTerrainH);
-                    float warpNoise = noise2D(vWorldPos.xz * 0.85 + vec2(uTime * 0.15));
+                    float shoreTotalEnergy = 0.0;
 
-                    // Onda dente-de-serra assimétrica: frente de espuma aguda avançando para a areia e cauda rendilhada recuando
-                    float surfPhase = shoreDepth * 1.45 - uTime * 0.58 * uWaveSpeed + warpNoise * 0.42;
-                    float surfFract = fract(surfPhase);
-                    float boreFront = smoothstep(0.0, 0.14, surfFract) * (1.0 - smoothstep(0.14, 0.32, surfFract));
-                    float backwashLace = (1.0 - surfFract) * smoothstep(0.02, 0.25, surfFract) * 0.72;
+                    if (shoreDepth < 2.8) {
+                        float warpNoise = noise2D(vWorldPos.xz * 0.75 + vec2(uTime * 0.14));
 
-                    // Segundo trem harmônico defasado para naturalidade
-                    float surfPhase2 = shoreDepth * 2.35 - uTime * 0.74 * uWaveSpeed - warpNoise * 0.35 + 0.45;
-                    float surfFract2 = fract(surfPhase2);
-                    float boreFront2 = smoothstep(0.0, 0.16, surfFract2) * (1.0 - smoothstep(0.16, 0.38, surfFract2));
+                        // Trem de rebentação principal: linha de impacto nítida + esteira de recuo rendilhada
+                        float surfPhase = shoreDepth * 1.55 - uTime * 0.56 * uWaveSpeed + warpNoise * 0.45;
+                        float surfFract = fract(surfPhase);
+                        float boreCrest = smoothstep(0.02, 0.11, surfFract) * (1.0 - smoothstep(0.11, 0.24, surfFract));
+                        float backwashWeb = (1.0 - surfFract) * smoothstep(0.04, 0.22, surfFract) * 0.52;
 
-                    float surfZoneEnvelope = (1.0 - smoothstep(0.15, 2.45, shoreDepth)) * smoothstep(-0.15, 0.02, shoreDepth);
-                    float beachWaterline = (1.0 - smoothstep(0.0, 0.26, shoreDepth)) * 0.95;
+                        // Segundo trem harmônico defasado
+                        float surfPhase2 = shoreDepth * 2.45 - uTime * 0.72 * uWaveSpeed - warpNoise * 0.35 + 0.48;
+                        float surfFract2 = fract(surfPhase2);
+                        float boreCrest2 = smoothstep(0.02, 0.12, surfFract2) * (1.0 - smoothstep(0.12, 0.26, surfFract2));
 
-                    // C) Espuma sobre a crista rasa do anel de recife de corais
-                    float reefBreaker = (1.0 - smoothstep(0.35, 1.85, shoreDepth)) * smoothstep(0.08, 0.35, abs(vWaveElevation)) * 0.65;
+                        float surfZoneEnv = (1.0 - smoothstep(0.25, 2.35, shoreDepth)) * smoothstep(-0.08, 0.03, shoreDepth);
+                        // Linha d'água muito fina e modulada pelas ondas (não um borrão estático)
+                        float delicateSwashEdge = (1.0 - smoothstep(0.0, 0.11, shoreDepth)) * (0.45 + 0.55 * boreCrest);
 
-                    float shoreTotalEnergy = surfZoneEnvelope * (boreFront * 1.25 + backwashLace + boreFront2 * 0.65) +
-                                             beachWaterline + reefBreaker;
+                        shoreTotalEnergy = surfZoneEnv * (boreCrest * 1.15 + backwashWeb + boreCrest2 * 0.60) + delicateSwashEdge;
+                    }
 
-                    totalRawFoamEnergy = (shoreTotalEnergy * 0.95 + whitecapEnergy * 0.92 + interactiveFoamEnergy * 0.90) * uFoamIntensity;
+                    totalRawFoamEnergy = (shoreTotalEnergy * 0.90 + whitecapEnergy * 0.88 + rippleFoamEnergy * 0.92 + objectWakeEnergy * 0.85) * uFoamIntensity;
                 }
 
-                // Avalia a rede celular Voronoi 3D da espuma
-                vec3 foamData = evaluateMultiScaleFoam(vWorldPos.xz, wave.yz, clamp(totalRawFoamEnergy, 0.0, 1.6), microFade);
-                float foamMask = foamData.x;
-                vec2 foamBumpSlope = foamData.yz * (0.085 * foamMask);
+                // Amostragem da espuma celular texturizada com erosão física
+                vec4 foamSample = sampleTexturedFoam(vWorldPos.xz, wave.yz, totalRawFoamEnergy, viewDist);
+                float foamMask = foamSample.x;
+                float foamBubbleDetail = foamSample.y;
+                vec2 foamBumpSlope = foamSample.zw * 0.09;
 
-                // Normal final da superfície (Ondas Gerstner + Ondas Capilares + Relevo 3D das Bolhas de Espuma)
+                // Normal final da superfície (Ondas Gerstner + Ondas Capilares + Micro-Relevo das Bolhas)
                 vec3 surfaceNormal = normalize(vec3(
                     -(wave.y + capillarySlope.x + foamBumpSlope.x),
                     1.0,
@@ -2543,7 +2535,6 @@
                     float depthFactor = clamp(waterPathLength / maxDepthNorm, 0.0, 1.0);
                     vec3 volumeTint = mix(uWaterShallowColor, uWaterDeepColor, depthFactor);
 
-                    // Subsurface Scattering (SSS) turquesa esmeralda através das cristas das ondas
                     float blDot = clamp(dot(viewDir, normalize(-uSunDir + surfaceNormal * 0.65)), 0.0, 1.0);
                     float backLight = blDot * blDot * blDot;
                     float crestFactor = smoothstep(-0.02, 0.16, vWaveElevation);
@@ -2555,15 +2546,14 @@
                     reflDir.y = max(0.02, reflDir.y);
                     vec3 reflectedColor = evaluateSkyReflection(reflDir);
 
-                    // Vetor meia-luz (Half-Vector) entre o Sol e a Câmera
                     vec3 halfVec = normalize(uSunDir + viewDir);
 
-                    // Camada 1: Coluna Solar Microfacetada GGX (caminho luminoso sobre a água)
+                    // Camada 1: Coluna Solar Microfacetada GGX
                     float baseRoughness = clamp(0.042 + 0.032 * uWaveHeight, 0.035, 0.12);
                     float ggxCore = distributionGGX(orientedNormal, halfVec, baseRoughness) * 0.22;
                     float ggxBroad = distributionGGX(orientedNormal, halfVec, baseRoughness * 2.8) * 0.045;
 
-                    // Camada 2: Cintilação Estocástica de Micro-Facetas (Glints brancos vivos que dançam nas ondas)
+                    // Camada 2: Cintilação Estocástica de Micro-Facetas (Glints)
                     vec3 glintNormal = normalize(vec3(
                         -(wave.y * 0.85 + capillarySlope.x * 3.4),
                         1.0,
@@ -2571,7 +2561,6 @@
                     ));
                     float NdotH_glint = max(0.0, dot(glintNormal, halfVec));
 
-                    // Máscara celular cintilante que isola facetas individuais refletindo o disco solar
                     vec2 sparkleGrid1 = vWorldPos.xz * 14.5 + vec2(uTime * 0.8, -uTime * 0.6);
                     vec2 sparkleGrid2 = vWorldPos.xz * 23.0 - vec2(uTime * 0.9, uTime * 0.75);
                     float sparkleMask = smoothstep(0.62, 0.94, noise2D(sparkleGrid1) * 0.55 + noise2D(sparkleGrid2) * 0.45);
@@ -2579,11 +2568,9 @@
                     float diamondSparkles = pow(NdotH_glint, 180.0) * sparkleMask * 6.5 +
                                             pow(NdotH_glint, 950.0) * 8.0;
 
-                    // A espuma densa é fosca, portanto atenua o reflexo especular onde há espuma grossa
                     float wetSpecularMask = 1.0 - smoothstep(0.25, 0.85, foamMask) * 0.82;
                     float glintScale = uSunGlintIntensity * wetSpecularMask;
 
-                    // Combina cor solar quente na borda do reflexo com núcleo branco puro incandescente
                     vec3 sunWhiteCore = mix(uSunColor, vec3(1.0, 0.995, 0.98), 0.72);
                     vec3 specularGlint = (uSunColor * (ggxBroad + ggxCore * 0.65) +
                                           sunWhiteCore * (ggxCore * 0.55 + diamondSparkles)) * glintScale;
@@ -2596,40 +2583,35 @@
                 }
 
                 // =====================================================================
-                // 4. COMPOSIÇÃO FÍSICA DA ESPUMA (ALBEDO + SSS + SOMBREAMENTO 3D)
+                // 4. COMPOSIÇÃO POROSA 3D DA ESPUMA (CAVIDADES + SSS + MICRO-BOLHAS)
                 // =====================================================================
                 if (foamMask > 0.005) {
-                    // Iluminação difusa 3D nas bolhas da espuma + espalhamento subsuperficial turquesa
-                    float foamNdotL = max(0.32, dot(orientedNormal, uSunDir));
-                    float sunElev = max(0.18, uSunDir.y);
+                    float foamNdotL = max(0.35, dot(orientedNormal, uSunDir));
+                    float sunElev = max(0.20, uSunDir.y);
 
-                    // Bordas finas da espuma absorvem um leve tom ciano/turquesa da água; o núcleo é branco neve
-                    float coreThickness = smoothstep(0.18, 0.72, foamMask);
-                    vec3 thinBubbleTint = mix(uWaterShallowColor * 0.45 + vec3(0.62, 0.68, 0.72), vec3(0.98, 0.99, 1.0), coreThickness);
+                    // Oclusão de ambiente entre as bolhas (foamBubbleDetail preserva a textura mesmo onde foamMask = 1.0!)
+                    vec3 cavityTint = mix(uWaterShallowColor * 0.35 + vec3(0.55, 0.66, 0.74), vec3(0.99, 0.995, 1.0), foamBubbleDetail);
 
-                    // Brilho úmido (wet sheen) nas bolhas recém-formadas
                     vec3 halfVec = normalize(uSunDir + viewDir);
-                    float bubbleSheen = pow(max(0.0, dot(orientedNormal, halfVec)), 36.0) * 0.35 * uSunGlintIntensity;
+                    float bubbleSheen = pow(max(0.0, dot(orientedNormal, halfVec)), 42.0) * 0.32 * foamBubbleDetail * uSunGlintIntensity;
 
-                    vec3 litFoamColor = thinBubbleTint * (mix(vec3(0.78, 0.86, 0.94), uSunColor, 0.55) * (0.55 + 0.52 * foamNdotL * sunElev)) +
+                    vec3 litFoamColor = cavityTint * (mix(vec3(0.80, 0.88, 0.96), uSunColor, 0.55) * (0.56 + 0.48 * foamNdotL * sunElev)) +
                                         vec3(1.0) * bubbleSheen;
 
-                    finalColor = mix(finalColor, litFoamColor, foamMask);
+                    finalColor = mix(finalColor, litFoamColor, foamMask * 0.94);
                 }
 
-                // Menisco óptico sutil nas bordas de azulejo da piscina
+                // Menisco sutil nas bordas de azulejo da piscina
                 if (!isOcean) {
                     float wallProximity = min(7.0 - abs(vWorldPos.x), 5.0 - abs(vWorldPos.z));
-                    float meniscus = (1.0 - smoothstep(0.0, 0.09, wallProximity)) * 0.24;
+                    float meniscus = (1.0 - smoothstep(0.0, 0.06, wallProximity)) * 0.16;
                     finalColor += vec3(0.90, 0.98, 1.0) * meniscus;
                 } else {
-                    // Neblina atmosférica suave no horizonte oceânico
                     float horizonFog = smoothstep(75.0, 215.0, viewDist);
                     vec3 horizonSkyCol = evaluateSkyReflection(normalize(vec3(-viewDir.x, 0.03, -viewDir.z)));
                     finalColor = mix(finalColor, horizonSkyCol, horizonFog);
                 }
 
-                // Tone mapping que preserva a brancura viva da espuma e o estalo dos glints solares
                 vec3 mapped = finalColor / (1.0 + finalColor * 0.075);
                 gl_FragColor = vec4(clamp(mapped, 0.0, 1.0), 1.0);
             }
@@ -2683,9 +2665,94 @@
         }, {
             attributes: ["position", "uv"],
             uniforms: sharedUniformNames,
-            samplers: ["uRefractionSampler"]
+            samplers: ["uRefractionSampler", "uFoamSampler"]
         });
         waterSurfaceMat.backFaceCulling = false;
+
+        // Gera uma textura 512x512 perfeitamente ladrilhável (seamless toroidal Voronoi)
+        // Canal R = Rede de Fronteiras de Plateau (bolhas grandes/médias)
+        // Canal G = Micro-bolhas aeradas de alta frequência (textura interna das cristas)
+        // Canal B = Aglomerados orgânicos para modular a erosão
+        function createSeamlessFoamTexture() {
+            const size = 256;
+            const tex = new BABYLON.DynamicTexture("proceduralFoamTex", { width: size, height: size }, scene, true, BABYLON.Texture.TRILINEAR_SAMPLINGMODE);
+            const ctx = tex.getContext();
+            const imgData = ctx.createImageData(size, size);
+            const data = imgData.data;
+
+            function cellHash(ix, iy, seed) {
+                const n = Math.sin(ix * 127.1 + iy * 311.7 + seed * 74.7) * 43758.5453;
+                return n - Math.floor(n);
+            }
+
+            // Avalia Voronoi periódico (seamless nas bordas 0..grid)
+            function seamlessVoronoi(u, v, grid, seed) {
+                const x = u * grid;
+                const y = v * grid;
+                const ix = Math.floor(x);
+                const iy = Math.floor(y);
+                const fx = x - ix;
+                const fy = y - iy;
+                let d1 = 8.0, d2 = 8.0;
+
+                for (let j = -1; j <= 1; j++) {
+                    for (let i = -1; i <= 1; i++) {
+                        const cx = (ix + i + grid) % grid;
+                        const cy = (iy + j + grid) % grid;
+                        const ox = 0.15 + 0.70 * cellHash(cx, cy, seed);
+                        const oy = 0.15 + 0.70 * cellHash(cx, cy, seed + 19.3);
+                        const rx = i + ox - fx;
+                        const ry = j + oy - fy;
+                        const d = rx * rx + ry * ry;
+                        if (d < d1) { d2 = d1; d1 = d; }
+                        else if (d < d2) { d2 = d; }
+                    }
+                }
+                const s1 = Math.sqrt(d1);
+                const s2 = Math.sqrt(d2);
+                // Paredes poligonais finas entre as bolhas + anel interno de cada bolha
+                const border = 1.0 - Math.min(1.0, (s2 - s1) / 0.24);
+                const bubbleRim = Math.exp(-Math.pow((s1 - 0.32) / 0.12, 2.0)) * 0.65;
+                return Math.min(1.0, border * border * 0.95 + bubbleRim);
+            }
+
+            for (let py = 0; py < size; py++) {
+                const v = py / size;
+                for (let px = 0; px < size; px++) {
+                    const u = px / size;
+                    const idx = (py * size + px) * 4;
+
+                    // R: Rede principal de bolhas (escalas 10 e 20 combinadas)
+                    const v10 = seamlessVoronoi(u, v, 10, 1.0);
+                    const v20 = seamlessVoronoi(u, v, 20, 7.0);
+                    const rVal = Math.min(1.0, v10 * 0.62 + v20 * 0.58);
+
+                    // G: Micro-bolhas densas (escalas 32 e 48) para preencher cristas sem borrar
+                    const v32 = seamlessVoronoi(u, v, 32, 13.0);
+                    const v48 = seamlessVoronoi(u, v, 48, 29.0);
+                    const gVal = Math.min(1.0, v32 * 0.58 + v48 * 0.55);
+
+                    // B: Modulação de aglomerados orgânicos (escala 6)
+                    const v6 = seamlessVoronoi(u, v, 6, 41.0);
+                    const bVal = Math.min(1.0, 0.35 + v6 * 0.65);
+
+                    data[idx + 0] = Math.round(rVal * 255);
+                    data[idx + 1] = Math.round(gVal * 255);
+                    data[idx + 2] = Math.round(bVal * 255);
+                    data[idx + 3] = 255;
+                }
+            }
+
+            ctx.putImageData(imgData, 0, 0);
+            tex.update(true);
+            tex.wrapU = BABYLON.Texture.WRAP_ADDRESSMODE;
+            tex.wrapV = BABYLON.Texture.WRAP_ADDRESSMODE;
+            tex.anisotropicFilteringLevel = 4;
+            return tex;
+        }
+
+        const proceduralFoamTex = createSeamlessFoamTexture();
+        waterSurfaceMat.setTexture("uFoamSampler", proceduralFoamTex);
 
         function bindCommonShaderUniforms(mat) {
             mat.setFloat("uTime", simState.time);
